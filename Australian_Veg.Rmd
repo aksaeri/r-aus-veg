@@ -1,0 +1,298 @@
+---
+author: "Alexander Saeri"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    fig_height: 6
+    fig_width: 8
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: no
+    number_sections: yes
+  word_document:
+    toc: yes
+    toc_depth: '4'
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      cache = FALSE,
+                      warning=FALSE, 
+                      message=FALSE)
+
+# ---- 
+# LOAD LIBRARIES 
+# ---- 
+
+# library(ggthemes)
+library(janitor)
+library(sjPlot)
+library(sjlabelled)
+library(tidyverse)
+library(pewmethods)
+# library(psych)
+# library(knitr)
+# library(ggrepel)
+# library(ggpubr)
+# library(stringr)
+
+# ---- 
+# LOAD DATA
+# ---- 
+
+
+## Note: update the following code to refer to the cleaned survey data you are reading in
+
+d_import <- readr::read_rds("https://osf.io/download/hg4kn/")
+
+
+
+abs_sex <- readxl::read_excel("abs_census2021_counts.xlsx", sheet = "sex") %>% 
+  adorn_percentages("col") %>% 
+  rename(Freq = n)
+
+abs_age <- readxl::read_excel("abs_census2021_counts.xlsx", sheet = "age") %>% 
+  filter(age >= 18) %>% 
+  mutate(age_group = case_when(
+    age >= 18 & age <= 29 ~ "18-29",
+    age >= 30 & age <= 39 ~ "30-39",
+    age >= 40 & age <= 49 ~ "40-49",
+    age >= 50 & age <= 59 ~ "50-59",
+    age >= 60 & age <= 69 ~ "60-69",
+    age >= 70 ~ "70+"
+  )) %>% 
+  group_by(age_group) %>%
+  summarise(n = sum(n)) %>% 
+  adorn_percentages("col") %>% 
+  rename(Freq = n)
+
+abs_state <- readxl::read_excel("abs_census2021_counts.xlsx", sheet = "state") %>% 
+  filter(state != "Other Territories") %>% 
+  # mutate(state = case_when(state == "New South Wales" ~ "NSW",
+  #                          state == "Victoria" ~ "VIC",
+  #                          state == "Queensland" ~ "QLD",
+  #                          state == "Western Australia" ~ "WA",
+  #                          state == "South Australia" ~ "SA",
+  #                          state == "Tasmania" ~ "TAS",
+  #                          state == "Australian Capital Territory" ~ "ACT",
+  #                          state == "Northern Territory" ~ "NT")) %>% 
+  # mutate(state = fct_relevel(state, "NSW","VIC","QLD","WA","SA","TAS","ACT","NT")) %>% 
+  adorn_percentages("col") %>% 
+  rename(Freq = n)
+
+raking_targets <- list(
+  abs_sex %>% 
+    mutate(sex = factor(sex),
+           Freq = Freq * 100) %>% 
+    as_tibble(),
+  abs_state %>% 
+    mutate(state = factor(state),
+           Freq = Freq * 100) %>% 
+    as_tibble(),
+  abs_age %>% 
+    mutate(age_group = factor(age_group),
+      Freq = Freq * 100) %>% 
+    as_tibble()
+)
+# 
+
+d <- d_import %>% 
+  # remove respondents who didn't answer any of the diet_consume questions [n ~ 9]
+  filter(rowSums(is.na(select(., starts_with("diet_consume")))) < 7) %>% 
+  # try to estimate sex based on respondent gender information, for weighting purposes
+  mutate(sex = factor(case_when(
+    gender_man == TRUE ~ "Male",
+    gender_woman == TRUE ~ "Female",
+    TRUE ~ "Other")),
+    age_group = factor(case_when(
+      age >= 18 & age <= 29 ~ "18-29",
+      age >= 30 & age <= 39 ~ "30-39",
+      age >= 40 & age <= 49 ~ "40-49",
+      age >= 50 & age <= 59 ~ "50-59",
+      age >= 60 & age <= 69 ~ "60-69",
+      age >= 70 ~ "70+")),
+    state = fct_drop(state)) %>% 
+  select(state, sex, age_group, diet_identity, matches("diet_consume")) %>% 
+  mutate(uid = row_number()) %>% 
+  mutate(across(matches("^diet_consume"), ~ case_when(
+    . == "Not at all" ~ 0,
+    . == "Less than 1 time per week" ~ 1,
+    . == "1-3 times per week" ~ 2,
+    . == "4-6 times per week" ~ 3,
+    . == "1 or more times per day" ~ 4))) %>% 
+  rowwise() %>% 
+  mutate(diet_meat_freq = sum(diet_consume_beef,
+                              diet_consume_chicken,
+                              diet_consume_fish,
+                              diet_consume_pork,
+                              diet_consume_lamb, na.rm = TRUE),
+         diet_animal_freq = sum(diet_meat_freq,
+                                diet_consume_eggs,
+                                diet_consume_dairy, na.rm = TRUE)) %>% 
+  ungroup()
+
+# due to the ABS 2021 census not reporting gender/sex beyond male and female,
+# respondents who gave a gender response other than 'male' or 'female' are
+# omitted from weighting. They will be readded for full analysis
+d_weights <- d %>% 
+  filter(sex %in% c("Male","Female")) %>% 
+  mutate(sex = fct_drop(sex),
+         weight = 1)
+
+# use pewmethods package to rake survey weights based on ABS data
+d_weights$weight <- rake_survey(
+  d_weights,
+  pop_margins = raking_targets)
+
+
+# join the data back to the main dataset
+d <- d %>%
+  left_join(select(d_weights, uid, weight), by = "uid") %>% 
+  mutate(weight = ifelse(is.na(weight), 1, weight))
+
+d <- d %>% 
+  mutate(diet_vegan_strict = if_else(diet_animal_freq == 0, TRUE, FALSE),
+         diet_vegan_moderate = if_else(diet_animal_freq <= 1, TRUE, FALSE),
+         diet_vegetarian_strict = if_else(diet_meat_freq == 0, TRUE, FALSE),
+         diet_vegetarian_moderate = if_else(diet_meat_freq <= 1, TRUE, FALSE))
+
+totalsum_weight <- sum(d$weight)
+ausadult_pop <- 20720000
+
+  
+d_wt_diet_identity <- d %>% 
+  filter(!is.na(diet_identity)) %>% 
+  summarise(count = sum(weight),
+            percent = sum(weight)/totalsum_weight,
+            .by = diet_identity) %>% 
+  mutate(diet_identity = fct_relabel(diet_identity, ~str_replace(.x, "\\s*\\([^\\)]+\\)", "")),
+         pop_est = percent * ausadult_pop,
+         pop_label = paste0(format(round(pop_est, -3), big.mark = ",", scentific = F),
+                            " (",
+                            round(percent*100,1),"%)"))
+  
+# estimate prop
+ggplot(d_wt_diet_identity, aes(x = fct_rev(diet_identity), y = percent, fill = diet_identity)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    scale_y_continuous(labels = scales::percent_format(scale = 100, accuracy = 1),  limits = c(0,.7)) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(title = "Diets of Australian adults",
+         x = "Self-described diet type",
+         y = "Percent of adult Australians (Estimated)",
+         caption = "Data from 2023 Animal Welfare Survey of 1,021 Australian adults weighted by ABS Census 2021 for sex, age, state/territory") +
+    geom_text(aes(label = scales::percent(percent, accuracy = 0.1)),
+              hjust = -0.2, vjust = 0.5) +
+    scale_x_discrete(labels = function(x) stringr::str_wrap(x, width = 20)) +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.title.x = element_text(margin = margin(t = 20)),
+        axis.text = element_text(size = 15),
+        plot.caption = element_text(face = "italic", margin = margin(t = 20)))
+
+ggsave("australian_adults_diet_identity_percent.png", width = 10, height = 6, bg = "white")
+
+# estimate number 
+ggplot(d_wt_diet_identity, aes(x = fct_rev(diet_identity), y = pop_est, fill = diet_identity)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    scale_y_continuous(labels = scales::label_comma(), limits = c(0,17e6)) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(title = "Diets of Australian adults",
+         x = "Self-described diet type",
+         y = "Adult Australians (Estimated)",
+         caption = "Data from 2023 Animal Welfare Survey of 1,021 Australian adults weighted by ABS Census 2021 for sex, age, state/territory\nEstimated 2023 Australian adult population ~ 20,720,000") +
+    geom_text(aes(label = pop_label, y = pop_est),
+              hjust = -0.1, vjust = 0.5) +
+    scale_x_discrete(labels = function(x) stringr::str_wrap(x, width = 20)) +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.title.x = element_text(margin = margin(t = 20)),
+        axis.text = element_text(size = 15),
+        plot.caption = element_text(face = "italic", margin = margin(t = 20)))
+
+ggsave("australian_adults_diet_identity_popest.png", width = 10, height = 6, bg = "white")
+
+
+d_wt_diet_class <- d %>% 
+  pivot_longer(cols = matches("^diet_v")) %>%
+  filter(!is.na(value)) %>%
+  summarise(count = sum(weight),
+            percent = sum(weight)/totalsum_weight,
+            .by = c(name, value)) %>% 
+  mutate(
+         pop_est = percent * ausadult_pop,
+         pop_label = paste0(format(round(pop_est, -3), big.mark = ",", scentific = F),
+                            " (",
+                            round(percent*100,1),"%)"),
+         name = factor(case_match(name,
+                          "diet_vegetarian_strict" ~ "Vegetarian (strict)",
+                          "diet_vegetarian_moderate" ~ "Vegetarian (moderate)",
+                          "diet_vegan_strict" ~ "Vegan (strict)",
+                          "diet_vegan_moderate" ~ "Vegan (moderate)"))) %>% 
+  filter(!value == FALSE)
+                          
+         
+
+
+ggplot(d_wt_diet_class, aes(x = fct_reorder(name, percent), y = percent, fill = name)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("#a6d854","#456216","#e78ac3","#7a1955")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, accuracy = 1), limits = c(0,.055)) +
+  labs(title = "Dietary intake of Australian adults",
+       x = "Classification based on dietary intake",
+       y = "Percent of adult Australians",
+       caption = "Data from 2023 Animal Welfare Survey of 1,021 Australian adults weighted by ABS Census 2021 for sex, age, state/territory
+       Definitions: 'strict' means eating meat / animal products not at all; 'moderate' means eating meat / animal products less than once a week") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.title.x = element_text(margin = margin(t = 20)),
+        axis.title.y = element_text(margin = margin(r = 20)),
+        axis.text = element_text(size = 15),
+        plot.caption = element_text(face = "italic", margin = margin(t = 20)),
+        plot.caption.position = "plot") +
+      scale_x_discrete(labels = function(x) stringr::str_wrap(x, width = 10)) +
+  geom_text(aes(label = scales::percent(percent, accuracy = 0.1)),
+            hjust = -0.2, vjust = 0.5)
+
+
+ggsave("australian_adults_diet_consume_percent.png", width = 10, height = 6, bg = "white")
+
+
+
+ggplot(d_wt_diet_class, aes(x = fct_reorder(name, percent), y = pop_est, fill = name)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("#a6d854","#456216","#e78ac3","#7a1955")) +
+   scale_y_continuous(labels = scales::label_comma(), limits = c(0,1.3e6)) +
+  labs(title = "Dietary consumption of Australian adults",
+       x = "Classification based on dietary consumption",
+       y = "Percent of adult Australians",
+       caption = "Data from 2023 Animal Welfare Survey of 1,021 Australian adults weighted by ABS Census 2021 for sex, age, state/territory
+       Definitions: 'strict' means eating meat (for vegetarians) / animal products (for vegans) not at all; 'moderate' means eating any meat / animal products less than once a week") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 15),
+        axis.title.x = element_text(margin = margin(t = 20)),
+        axis.title.y = element_text(margin = margin(r = 20)),
+        axis.text = element_text(size = 15),
+        plot.caption = element_text(face = "italic", margin = margin(t = 20)),
+        plot.caption.position = "plot") +
+      geom_text(aes(label = pop_label, y = pop_est),
+              hjust = -0.1, vjust = .5)
+
+ggsave("australian_adults_diet_consume_popest.png", width = 10, height = 6, bg = "white")
+
+
+```
