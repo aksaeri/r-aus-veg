@@ -115,7 +115,7 @@ d <- d_import %>%
       age >= 60 & age <= 69 ~ "60-69",
       age >= 70 ~ "70+")),
     state = fct_drop(state)) %>% 
-  select(state, sex, age_group, diet_identity, matches("diet_consume")) %>% 
+  # select(state, sex, age_group, diet_identity, matches("diet_consume")) %>% 
   mutate(uid = row_number()) %>% 
   mutate(across(matches("^diet_consume"), ~ case_when(
     . == "Not at all" ~ 0,
@@ -132,7 +132,11 @@ d <- d_import %>%
          diet_animal_freq = sum(diet_meat_freq,
                                 diet_consume_eggs,
                                 diet_consume_dairy, na.rm = TRUE)) %>% 
-  ungroup()
+  ungroup() %>% 
+  mutate(diet_vegan_strict = if_else(diet_animal_freq == 0, TRUE, FALSE),
+         diet_vegan_moderate = if_else(diet_animal_freq <= 1, TRUE, FALSE),
+         diet_vegetarian_strict = if_else(diet_meat_freq == 0, TRUE, FALSE),
+         diet_vegetarian_moderate = if_else(diet_meat_freq <= 1, TRUE, FALSE))
 
 # due to the ABS 2021 census not reporting gender/sex beyond male and female,
 # respondents who gave a gender response other than 'male' or 'female' are
@@ -153,11 +157,6 @@ d <- d %>%
   left_join(select(d_weights, uid, weight), by = "uid") %>% 
   mutate(weight = ifelse(is.na(weight), 1, weight))
 
-d <- d %>% 
-  mutate(diet_vegan_strict = if_else(diet_animal_freq == 0, TRUE, FALSE),
-         diet_vegan_moderate = if_else(diet_animal_freq <= 1, TRUE, FALSE),
-         diet_vegetarian_strict = if_else(diet_meat_freq == 0, TRUE, FALSE),
-         diet_vegetarian_moderate = if_else(diet_meat_freq <= 1, TRUE, FALSE))
 
 totalsum_weight <- sum(d$weight)
 ausadult_pop <- 20720000
